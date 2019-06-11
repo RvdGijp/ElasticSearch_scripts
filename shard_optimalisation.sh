@@ -22,8 +22,9 @@ MAX_SHARD_HEAP=$((1024/20)) # Max 20 shards per GB heap space
 
 COLLECT_DATA=1
 CREATE_OUTPUT=0
+SUBJECT=""
 
-while getopts "ri:o" opt; do
+while getopts "ri:os:" opt; do
   case ${opt} in
     r ) # Remove old db and start reading
       rm ${SHARD_DB}
@@ -35,7 +36,10 @@ while getopts "ri:o" opt; do
       COLLECT_DATA=0
       CREATE_OUTPUT=1 
       ;;
-    \? ) echo "Usage: shard_optimalisation.sh [-r] [-i filename] [-o]"
+    s ) # Do just one index
+      SUBJECT=$OPTARG
+      ;;
+    \? ) echo "Usage: shard_optimalisation.sh [-r] [-i filename]"
       echo ""
       exit
       ;;
@@ -71,9 +75,14 @@ if [ " ${COLLECT_DATA} " == " 1 " ]; then
 
   # Get the number of shards per index
   printf "\nReading your Elastic shard configuration.\n"
-  mapfile -t shard < <(curl -sS -XGET "${ES_NODE}:${ES_PORT}/_cat/indices?bytes=b&h=index,status,pri,rep,health,pri.store.size")
+  if [ -z "${SUBJECT}" ]; then
+    mapfile -t shard < <(curl -sS -XGET "${ES_NODE}:${ES_PORT}/_cat/indices?bytes=b&h=index,status,pri,rep,health,pri.store.size")
+  else
+    mapfile -t shard < <(curl -sS -XGET "${ES_NODE}:${ES_PORT}/_cat/indices/${SUBJECT}?bytes=b&h=index,status,pri,rep,health,pri.store.size")
+  fi
   for line in "${shard[@]}"
   do
+    stored=0
     shard_line=($line)
     index=${shard_line[0]}
     state=${shard_line[1]}
@@ -82,11 +91,13 @@ if [ " ${COLLECT_DATA} " == " 1 " ]; then
     health=${shard_line[4]}
     store=${shard_line[5]}
     # If index already in store skip this entry
-    store=($(sqlite3 ${SHARD_DB} "SELECT 1 FROM indices WHERE index_name='${index}'"))
-    if [ " ${store} " != " 1 " ]; then
-      min_shards=$((($store+${MAX_SHARD_SIZE}-1)/${MAX_SHARD_SIZE}))
-      max_shards=$((($store+${MIN_SHARD_SIZE}-1)/${MIN_SHARD_SIZE}))
-      noPrime
+    stored=($(sqlite3 ${SHARD_DB} "SELECT 1 FROM indices WHERE index_name='${index}'"))
+    if [ " ${stored} " != " 1 " ]; then
+      if [ " ${state} " == " open " ]; then
+        min_shards=$((($store+${MAX_SHARD_SIZE}-1)/${MAX_SHARD_SIZE}))
+        max_shards=$((($store+${MIN_SHARD_SIZE}-1)/${MIN_SHARD_SIZE}))
+        noPrime
+      fi
       if [ " ${state} " == " close " ]; then
         printf "\nOpening closed index ${index}\n"
         response=0
@@ -102,12 +113,12 @@ if [ " ${COLLECT_DATA} " == " 1 " ]; then
           shard=${shard_line[2]}
           rep=${shard_line[3]}
           health=${shard_line[4]}
-          if [ " ${health} " == " red " ]; then
+          store=${shard_line[5]}
+          if [ " ${store} " == "  " ]; then
             store="NULL"
             min_shards="NULL"
             max_shards="NULL"
           else
-            store=${shard_line[5]}
             min_shards=$((($store+${MAX_SHARD_SIZE}-1)/${MAX_SHARD_SIZE}))
             max_shards=$((($store+${MIN_SHARD_SIZE}-1)/${MIN_SHARD_SIZE}))
           fi
@@ -133,6 +144,12 @@ if [ " ${COLLECT_DATA} " == " 1 " ]; then
   done
   
   # Get sum of shard sizes
+  WHERE=""
+
+  if [ -z "${SUBJECT}" ]; then
+    WHERE="' WHERE index_name='${SUBJECT}' " 
+  fi
+
   printf "\nThe optimal number of shards based on storage, ATTENTION no considerations with prime numbers, command output does.\n"
   sqlite3 ${SHARD_DB} <<EOF
 .mode column
@@ -142,7 +159,7 @@ if [ " ${COLLECT_DATA} " == " 1 " ]; then
   min_shards as min_num_shards_storage, 
   max_shards as max_num_shards_storage,
   (100/max_shards)*shard as percent
-  FROM indices ORDER BY percent DESC;
+  FROM indices ${WHERE} ORDER BY percent DESC;
 EOF
 fi
  
