@@ -13,7 +13,7 @@ set -e
 ES_NODE=http://127.0.0.1
 ES_PORT=9200
 SHARD_DB=/tmp/shards.db 
-PRIME=(0 1 2 3 5 7 11 13 17 19 29 31 37 41 43 47 53 59 61 67 71 73 79 83 89 97 )
+PRIME=(0 1 2 3 5 7 11 13 17 19 29 31 37 41 43 47 53 59 61 67 71 73 79 83 89 97 101 103 107 109 113 127 131 137 139 149 151 157 163 167 173 179 181 191 193 197 199 211 223 227 229 233 239 241 251 257 263 269 271)
 
 # Optimal sizes are based on this blog post; https://www.elastic.co/blog/how-many-shards-should-i-have-in-my-elasticsearch-cluster
 MIN_SHARD_SIZE=$((20*1024*1024*1024)) # Shard min 20GB in bytes
@@ -24,28 +24,38 @@ COLLECT_DATA=1
 CREATE_OUTPUT=0
 SUBJECT=""
 
-while getopts "ri:os:" opt; do
+while getopts "rd:oi:" opt; do
   case ${opt} in
     r ) # Remove old db and start reading
-      rm ${SHARD_DB}
+      if [ -f "${SHARD_DB}" ]; then
+        rm ${SHARD_DB}
+      fi
       ;;
-    i ) # Append dbfile and start reading
+    d ) # Append dbfile and start reading
       SHARD_DB=$OPTARG
       ;;
     o ) # Skip reading and generate output based on db
       COLLECT_DATA=0
       CREATE_OUTPUT=1 
       ;;
-    s ) # Do just one index
+    i ) # Do just one index
       SUBJECT=$OPTARG
       ;;
-    \? ) echo "Usage: shard_optimalisation.sh [-r] [-i filename]"
+    \? ) echo "Usage: shard_optimalisation.sh [-r] [-d <sqlite3 filename> ] [-i <index name>]"
       echo ""
       exit
       ;;
   esac
 done
 shift $((OPTIND -1))
+
+# Get sum of shard sizes
+WHERE=""
+
+if [ ! -z "${SUBJECT}" ]; then
+  WHERE=" AND index_name='${SUBJECT}' "
+fi
+
 
 if [ " ${COLLECT_DATA} " == " 1 " ]; then
   sqlite3 ${SHARD_DB} "CREATE TABLE IF NOT EXISTS indices ( \
@@ -143,14 +153,7 @@ if [ " ${COLLECT_DATA} " == " 1 " ]; then
     sqlite3 ${SHARD_DB} "INSERT INTO nodes (node,heap) VALUES('${shard_line[0]}','${shard_line[1]}');"
   done
   
-  # Get sum of shard sizes
-  WHERE=""
-
-  if [ -z "${SUBJECT}" ]; then
-    WHERE="' WHERE index_name='${SUBJECT}' " 
-  fi
-
-  printf "\nThe optimal number of shards based on storage, ATTENTION no considerations with prime numbers, command output does.\n"
+  printf "\nThe optimal number of shards based on storage.\n"
   sqlite3 ${SHARD_DB} <<EOF
 .mode column
 .header on
@@ -159,7 +162,7 @@ if [ " ${COLLECT_DATA} " == " 1 " ]; then
   min_shards as min_num_shards_storage, 
   max_shards as max_num_shards_storage,
   (100/max_shards)*shard as percent
-  FROM indices ${WHERE} ORDER BY percent DESC;
+  FROM indices WHERE percent>100 ${WHERE} ORDER BY percent DESC;
 EOF
 fi
  
@@ -186,7 +189,7 @@ if [ " ${CREATE_OUTPUT} " == " 1 " ]; then
   min_shards as min_num_shards_storage,
   rep, 
   (100/max_shards)*shard as percent
-  FROM indices WHERE percent>100 ORDER BY percent DESC limit 0,1;
+  FROM indices WHERE percent>100 ${WHERE} ORDER BY percent DESC limit 0,1;
 EOF
   ))
   
